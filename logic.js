@@ -304,3 +304,54 @@ export function waitText(seconds) {
   if (seconds < 5400) return `ca. ${plural(Math.round(seconds / 60), 'Minute', 'Minuten')}`;
   return `ca. ${plural(Math.round(seconds / 3600), 'Stunde', 'Stunden')}`;
 }
+
+// ---------- Anspielen ----------
+
+/** Anteil der Laufzeit, ab dem angespielt wird. Spotify liefert keine Daten zur meistgehörten Stelle, das ist eine Schätzung. */
+export const START_SHARE = 0.35;
+const MIN_TAIL_MS = 25000; // so viel soll ab dem Startpunkt mindestens noch kommen
+
+/** Startpunkt in Millisekunden: ca. 35 % der Laufzeit, bei kurzen Titeln früher. */
+export function startPosition(durationMs, share = START_SHARE) {
+  const d = Number(durationMs) || 0;
+  if (d <= 0) return 0;
+  const pos = Math.round(d * share);
+  return Math.max(0, Math.min(pos, d - MIN_TAIL_MS));
+}
+
+/** Zeit als m:ss. */
+export function formatTime(ms) {
+  const total = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+/** Kennung eines Titels aus seiner Spotify-URI (spotify:track:ID). */
+export function trackId(uri) {
+  const m = /^spotify:track:([A-Za-z0-9]+)$/.exec(uri || '');
+  return m ? m[1] : '';
+}
+
+/** Fehlen dem Zugang Rechte? granted ist die Liste aus der Antwort von Spotify (durch Leerzeichen getrennt). */
+export function missingScopes(granted, needed) {
+  if (typeof granted !== 'string') return [...needed];
+  const have = new Set(granted.split(/\s+/).filter(Boolean));
+  return needed.filter((s) => !have.has(s));
+}
+
+/**
+ * Wählt ein Spotify-Gerät zum Abspielen: zuerst das zuletzt gewählte, dann (am Handy) ein Smartphone,
+ * am PC ein Computer, jeweils das aktive zuerst; sonst das aktive, sonst das erste. Gesperrte Geräte nie.
+ */
+export function pickDevice(devices, savedId, preferPhone) {
+  const usable = (Array.isArray(devices) ? devices : []).filter((d) => d && d.id && !d.is_restricted);
+  if (usable.length === 0) return null;
+  const wanted = preferPhone ? 'smartphone' : 'computer';
+  const ofType = usable.filter((d) => String(d.type).toLowerCase() === wanted);
+  return (
+    usable.find((d) => d.id === savedId) ||
+    ofType.find((d) => d.is_active) ||
+    ofType[0] ||
+    usable.find((d) => d.is_active) ||
+    usable[0]
+  );
+}

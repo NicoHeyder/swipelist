@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<!-- Schutzregel (CSP): Die Seite führt nur eigene Skripte aus, spricht nur mit Spotify und lädt Bilder nur von Spotifys Bildservern. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com; media-src 'none'; font-src 'self'; connect-src https://api.spotify.com https://accounts.spotify.com; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<!-- Schutzregel (CSP): Die Seite führt nur eigene Skripte und Spotifys Abspiel-Baustein (sdk.scdn.co) aus, spricht nur mit Spotify und lädt Bilder nur von Spotifys Bildservern. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://sdk.scdn.co; style-src 'self'; img-src 'self' data: https://*.scdn.co https://*.spotifycdn.com; media-src 'none'; font-src 'self'; connect-src https://api.spotify.com https://accounts.spotify.com; frame-src https://sdk.scdn.co; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
 <meta name="theme-color" content="#17171A">

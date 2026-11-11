@@ -76,6 +76,13 @@ class World:
         self.genres = True
         self.no_top = False
         self.devices_forbidden = False
+        self.scope = ""        # bei der Anmeldung erteilte Rechte (aus der Anfrage übernommen)
+        self.scope_override = None  # simuliert einen alten Zugang mit weniger Rechten
+        self.plays = []         # (gerät, uri, position_ms) aller Abspielbefehle
+        self.player_calls = []  # (aktion, gerät, wert) für Pause und Springen
+        self.sdk_mode = "ok"    # ok | unsupported | silent: Verhalten des nachgebauten Browser-Players
+        self.sdk_ready = False
+        self.play_fail = None   # {"status": 403, "reason": "PREMIUM_REQUIRED"} für alle Abspielbefehle (nicht Pause und Springen)
         self.devices = [
             {"id": "d1", "name": "Nicos Rechner", "type": "Computer", "is_active": True},
             {"id": "d2", "name": "Nicos Handy", "type": "Smartphone", "is_active": False},
@@ -139,13 +146,14 @@ class World:
             return 204, None, {}
         self.log.append((method, path))
         token = (headers.get("authorization") or "").replace("Bearer ", "")
-        if self.force_401_once:
+        is_player = path.startswith("/me/player/") and method == "PUT"
+        if self.force_401_once and not is_player:
             self.force_401_once = False
             self.tokens.discard(token)
             return 401, {"error": {"status": 401, "message": "The access token expired"}}, {}
         if token not in self.tokens:
             return 401, {"error": {"status": 401, "message": "Invalid access token"}}, {}
-        if self.force_429:
+        if self.force_429 and not is_player:
             f = self.force_429
             self.force_429 = None
             payload = {"error": {"status": 429, "message": "API rate limit exceeded"}}
@@ -236,6 +244,32 @@ class World:
             return 200, {"items": [{"id": "al1", "name": "Album 1"}, {"id": "al2", "name": "Album 2"}], "total": 2}, {}
         if method == "GET" and len(parts) == 3 and parts[0] == "albums" and parts[2] == "tracks":
             return 200, {"items": [{"id": "t001", "name": "Nachtbus 1", "artists": [{"id": "a1", "name": "A"}, {"id": "a2", "name": "B"}]}], "total": 1}, {}
+        if method == "PUT" and path in ("/me/player/play", "/me/player/pause", "/me/player/seek"):
+            dev = q.get("device_id")
+            known = {d["id"]: d for d in self.devices}
+            if self.sdk_ready:
+                known["sdk-dev"] = {"id": "sdk-dev", "type": "Computer"}
+            if self.play_fail and path == "/me/player/play":
+                f = self.play_fail
+                return f["status"], {"error": {"status": f["status"], "message": f.get("message", "Player command failed"), "reason": f.get("reason", "")}}, {}
+            if dev not in known:
+                return 404, {"error": {"status": 404, "message": "Device not found", "reason": "NO_ACTIVE_DEVICE"}}, {}
+            if known[dev].get("is_restricted"):
+                return 403, {"error": {"status": 403, "message": "Player command failed: Restriction violated", "reason": "UNKNOWN"}}, {}
+            if path == "/me/player/play":
+                assert len(data["uris"]) == 1 and isinstance(data["position_ms"], int)
+                self.plays.append((dev, data["uris"][0], data["position_ms"]))
+            elif path == "/me/player/pause":
+                self.player_calls.append(("pause", dev, None))
+            else:
+                self.player_calls.append(("seek", dev, int(q["position_ms"])))
+            return 204, None, {}
+        if method == "GET" and path == "/me/player":
+            if not self.plays:
+                return 204, None, {}
+            dev, uri, pos = self.plays[-1]
+            paused = bool(self.player_calls) and self.player_calls[-1][0] == "pause"
+            return 200, {"is_playing": not paused, "progress_ms": pos, "device": {"id": dev}, "item": {"uri": uri}}, {}
         if method == "GET" and path == "/me/player/devices":
             if self.devices_forbidden:
                 return 403, {"error": {"status": 403, "message": "Insufficient client scope"}}, {}
@@ -250,7 +284,8 @@ class World:
             if not ok:
                 return 400, {"error": "invalid_grant", "error_description": "Invalid authorization code"}
             self.tokens = {"AT1"}
-            return 200, {"access_token": "AT1", "token_type": "Bearer", "expires_in": 3600, "refresh_token": "RT1", "scope": "x"}
+            granted = self.scope_override if self.scope_override is not None else self.scope
+            return 200, {"access_token": "AT1", "token_type": "Bearer", "expires_in": 3600, "refresh_token": "RT1", "scope": granted}
         if f.get("grant_type") == "refresh_token":
             if f.get("refresh_token") not in ("RT1", "RT2") or not f.get("client_id"):
                 return 400, {"error": "invalid_grant", "error_description": "Invalid refresh token"}
@@ -258,3 +293,42 @@ class World:
             self.tokens = {new}
             return 200, {"access_token": new, "token_type": "Bearer", "expires_in": 3600, "refresh_token": "RT2"}
         return 400, {"error": "unsupported_grant_type"}
+
+
+def fake_sdk(mode):
+    """Nachbau von Spotifys Web Playback SDK. Legt wie das Original einen Rahmen von sdk.scdn.co an (prüft die Schutzregel)."""
+    return """
+(function () {
+  var calls = window.__sdkCalls = [];
+  function Player(opts) { this.opts = opts; this.l = {}; window.__sdkPlayer = this; }
+  Player.prototype.addListener = function (ev, fn) { (this.l[ev] = this.l[ev] || []).push(fn); return true; };
+  Player.prototype.on = Player.prototype.addListener;
+  Player.prototype.removeListener = function () { return true; };
+  Player.prototype.emit = function (ev, arg) { (this.l[ev] || []).forEach(function (f) { f(arg); }); };
+  Player.prototype.connect = function () {
+    var self = this;
+    var f = document.createElement('iframe');
+    f.src = 'https://sdk.scdn.co/embedded/index.html';
+    f.allow = 'encrypted-media; autoplay';
+    f.style.display = 'none';
+    document.body.appendChild(f);
+    return new Promise(function (resolve) {
+      setTimeout(function () {
+        if ('MODE' === 'unsupported') { self.emit('initialization_error', { message: 'Browser not supported' }); resolve(false); return; }
+        if ('MODE' === 'silent') { resolve(true); return; }
+        self.opts.getOAuthToken(function (t) { window.__sdkToken = t; self.emit('ready', { device_id: 'sdk-dev' }); resolve(true); });
+      }, 50);
+    });
+  };
+  ['activateElement', 'pause', 'resume', 'togglePlay', 'disconnect', 'previousTrack', 'nextTrack'].forEach(function (name) {
+    Player.prototype[name] = function () { calls.push(name); return Promise.resolve(); };
+  });
+  Player.prototype.seek = function (ms) { calls.push('seek:' + ms); return Promise.resolve(); };
+  Player.prototype.getCurrentState = function () { return Promise.resolve(null); };
+  Player.prototype.setName = function () { return Promise.resolve(); };
+  Player.prototype.getVolume = function () { return Promise.resolve(0.8); };
+  Player.prototype.setVolume = function () { return Promise.resolve(); };
+  window.Spotify = { Player: Player };
+  setTimeout(function () { if (window.onSpotifyWebPlaybackSDKReady) window.onSpotifyWebPlaybackSDKReady(); }, 0);
+})();
+""".replace("MODE", mode)

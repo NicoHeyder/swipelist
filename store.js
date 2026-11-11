@@ -64,7 +64,7 @@ export const store = {
    */
   clearUserData() {
     for (const id of read('cacheOrder') || []) remove(`cache.${id}`);
-    for (const key of ['me', 'cacheOrder', 'draft', 'archives', 'lastApply']) remove(key);
+    for (const key of ['me', 'cacheOrder', 'draft', 'archives', 'lastApply', 'play']) remove(key);
     try {
       for (let i = localStorage.length - 1; i >= 0; i -= 1) {
         const key = localStorage.key(i);

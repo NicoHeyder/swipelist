@@ -3,13 +3,15 @@
 import * as L from './logic.js';
 import { store } from './store.js';
 import * as sp from './spotify.js';
+import * as player from './player.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const ROUND_SIZES = [20, 50, 0]; // 0 = alle
 const LIST_MAX_AGE_MS = 10 * 60 * 1000; // danach wird die Playlist-Liste beim Anzeigen neu geholt
 const FRESH_MS = 20 * 1000; // vor dem Start einer Runde darf die Liste höchstens so alt sein
 const MAX_EXACT_RUNS = 100; // mehr Einzelabrufe macht „Rückgängig“ nicht, dann kommen die Titel ans Ende
 const UNDO_KEEP_MS = 7 * 24 * 60 * 60 * 1000; // so lange bleibt „Rückgängig“ für das letzte Anwenden angeboten
+const AUTO_PLAY_DELAY_MS = 350; // kurz warten, damit schnelles Wischen nicht jeden Titel einzeln startet
 
 const root = document.getElementById('app');
 const toastEl = document.getElementById('toast');
@@ -68,6 +70,11 @@ const ICONS = {
       '<circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"></path>',
     ),
   note: (s) => svg(s, '<path d="M9 18V5l11-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="17" cy="16" r="3"></circle>'),
+  play: (s) => svg(s, '<path d="M8 5.5v13l11-6.5z" fill="currentColor" stroke="none"></path>'),
+  pause: (s) => svg(s, '<rect x="6.5" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none"></rect><rect x="13.5" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none"></rect>'),
+  alert: (s) => svg(s, '<circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5"></path><path d="M12 16.5h.01"></path>'),
+  speaker: (s) =>
+    svg(s, '<rect x="5" y="2.5" width="14" height="19" rx="3"></rect><circle cx="12" cy="14.5" r="3.5"></circle><path d="M12 6.5h.01"></path>'),
 };
 
 function icon(name, size = 24) {
@@ -98,6 +105,7 @@ function toast(text, ms = 4000) {
 }
 
 function mount(view, extraClass, ...kids) {
+  if (S.view === 'swipe' && view !== 'swipe') leaveSwipe();
   S.view = view;
   const el = h('section', { class: `view${extraClass ? ` ${extraClass}` : ''}` }, ...kids);
   root.replaceChildren(el);
@@ -275,7 +283,7 @@ function showLogin() {
       'p',
       {
         class: 'small mt-16',
-        text: 'Die App liest und ändert deine Playlists. Nur lesen darf sie deine Hörstatistik, deine gespeicherten Titel sowie deine Abspielgeräte samt aktuellem Wiedergabestand. Dein Passwort gibst du nur bei Spotify ein, die App sieht es nie.',
+        text: 'Die App liest und ändert deine Playlists und spielt Titel über Spotify an. Nur lesen darf sie deine Hörstatistik, deine gespeicherten Titel sowie deine Abspielgeräte samt aktuellem Wiedergabestand. Für das Abspielen im Browser verlangt Spotify zusätzlich Lesezugriff auf Kontoart und E-Mail-Adresse, die App nutzt beides nicht. Dein Passwort gibst du nur bei Spotify ein, die App sieht es nie.',
       },
     ),
     h('div', { class: 'grow' }),
@@ -296,6 +304,7 @@ async function changeClientId() {
     const ok = await ask({ title: 'Client-ID ändern?', text: `Du wirst dabei abgemeldet. ${LOGOUT_TEXT}`, yes: 'Abmelden und ändern' });
     if (!ok) return;
   }
+  player.reset();
   sp.logout();
   store.remove('clientId');
   resetState();
@@ -691,9 +700,259 @@ function showSwipe() {
         h('div', { class: 'act__label', text: 'Behalten' }),
       ),
     ),
-    h('p', { class: 'keys', text: '← Entfernen · → Behalten · Z Rückgängig' }),
+    h('p', { class: 'keys', text: '← Entfernen · → Behalten · Leertaste Anspielen · Z Rückgängig' }),
   );
+  clearInterval(progressTimer);
+  progressTimer = setInterval(updateProgress, 250);
+  player.prepare();
   refreshSwipe();
+  if (player.needsReconnect() && !reconnectHinted) {
+    reconnectHinted = true;
+    toast('Neu: Titel anspielen. Dafür braucht Swipelist einmal zusätzliche Rechte, tippe auf den Abspielknopf.', 7000);
+  }
+}
+
+// ---------- Anspielen ----------
+
+let playTimer = null;
+let progressTimer = null;
+let reconnectHinted = false;
+let lastAutoError = '';
+
+function leaveSwipe() {
+  clearTimeout(playTimer);
+  clearInterval(progressTimer);
+  progressTimer = null;
+  player.stop();
+  for (const key of ['playBtn', 'playIcon', 'seek', 'seekFill', 'timeNow']) ui[key] = null;
+}
+
+/** Spielt die oberste Karte nach kurzer Pause automatisch an, wenn das eingeschaltet ist. */
+function scheduleAutoPlay() {
+  clearTimeout(playTimer);
+  const card = S.session && L.currentCard(S.session);
+  if (!card) return;
+  if (!player.autoEnabled() || player.needsReconnect()) {
+    const st = player.state();
+    if (st.uri && st.uri !== card.uri) player.pause();
+    return;
+  }
+  if (player.isPlaying(card.uri)) return;
+  playTimer = setTimeout(() => {
+    if (S.view !== 'swipe' || !S.session || document.querySelector('dialog[open]')) return;
+    const now = L.currentCard(S.session);
+    if (now && now.uri === card.uri && !player.isPlaying(card.uri)) player.play(card, L.startPosition(card.durationMs), { auto: true });
+  }, AUTO_PLAY_DELAY_MS);
+}
+
+function onPlayButton() {
+  const card = S.view === 'swipe' && S.session && L.currentCard(S.session);
+  if (!card) return;
+  player.unlock();
+  lastAutoError = '';
+  if (player.needsReconnect()) {
+    openPlaySheet();
+    return;
+  }
+  player.toggle(card);
+}
+
+function updatePlayUi() {
+  if (S.view !== 'swipe' || !ui.playBtn) return;
+  const card = L.currentCard(S.session);
+  if (!card) return;
+  const st = player.state();
+  const status = st.uri === card.uri ? st.status : 'idle';
+  const name = status === 'playing' || status === 'starting' ? 'pause' : status === 'error' ? 'alert' : 'play';
+  ui.playBtn.className = `playbtn is-${status}`;
+  if (ui.playIcon !== name) {
+    ui.playIcon = name;
+    ui.playBtn.replaceChildren(icon(name, 24));
+  }
+  const labels = { playing: 'Pause', starting: 'Pause', error: 'Erneut anspielen', paused: 'Weiter abspielen', idle: 'Anspielen' };
+  ui.playBtn.setAttribute('aria-label', labels[status] || 'Anspielen');
+  updateProgress();
+}
+
+function updateProgress() {
+  if (S.view !== 'swipe' || !ui.seekFill || !S.session) return;
+  if (player.sinceSync() > 15000) player.sync();
+  const card = L.currentCard(S.session);
+  if (!card) return;
+  const d = card.durationMs || 0;
+  const st = player.state();
+  const active = st.uri === card.uri && (st.status === 'playing' || st.status === 'starting' || st.status === 'paused');
+  if (active && d) {
+    const pos = player.position();
+    ui.seekFill.style.width = `${Math.min(100, (pos / d) * 100).toFixed(2)}%`;
+    ui.timeNow.textContent = L.formatTime(pos);
+    ui.seek.setAttribute('aria-valuenow', String(Math.round(pos / 1000)));
+    ui.seek.setAttribute('aria-valuetext', L.formatTime(pos));
+  } else {
+    ui.seekFill.style.width = '0%';
+    ui.timeNow.textContent = d ? `ab ${L.formatTime(L.startPosition(d))}` : '';
+    ui.seek.setAttribute('aria-valuenow', String(Math.round(L.startPosition(d) / 1000)));
+    ui.seek.setAttribute('aria-valuetext', d ? `ab ${L.formatTime(L.startPosition(d))}` : '');
+  }
+}
+
+/** Tippen auf die Leiste springt an diese Stelle. */
+function onSeek(event, track) {
+  if (!track.durationMs || needsSheetFirst()) return;
+  const rect = ui.seek.getBoundingClientRect();
+  const share = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 1);
+  player.unlock();
+  player.seek(track, share * track.durationMs);
+}
+
+/** Tastatur auf der Leiste: Pfeile springen 10 Sekunden, Pos1 und Ende an Anfang und Schluss. */
+function onSeekKey(event, track) {
+  const steps = { ArrowLeft: -10000, ArrowRight: 10000, ArrowDown: -10000, ArrowUp: 10000 };
+  if (!(event.key in steps) && event.key !== 'Home' && event.key !== 'End') return;
+  event.preventDefault();
+  event.stopPropagation(); // sonst wirken die Pfeile als Wischen
+  if (event.repeat || !track.durationMs || needsSheetFirst()) return;
+  const st = player.state();
+  const base = st.uri === track.uri && st.status !== 'idle' && st.status !== 'error' ? player.position() : L.startPosition(track.durationMs);
+  const to = event.key === 'Home' ? 0 : event.key === 'End' ? track.durationMs - 15000 : base + steps[event.key];
+  player.unlock();
+  player.seek(track, to);
+}
+
+function needsSheetFirst() {
+  if (!player.needsReconnect()) return false;
+  openPlaySheet();
+  return true;
+}
+
+player.onChange(updatePlayUi);
+player.onError((err) => {
+  if (S.view !== 'swipe') return;
+  if (err.kind === 'relogin') {
+    saveDraft();
+    showLogin();
+    toast(err.text, 7000);
+    return;
+  }
+  // Beim automatischen Anspielen denselben Fehler nicht bei jeder Karte wiederholen.
+  if (err.auto && err.kind === lastAutoError) return;
+  lastAutoError = err.auto ? err.kind : '';
+  toast(err.text, 8000);
+});
+
+const DEVICE_TYPES = { computer: 'Computer', smartphone: 'Handy', tablet: 'Tablet', speaker: 'Lautsprecher', tv: 'Fernseher', avr: 'Verstärker', stb: 'TV-Box', audiodongle: 'Audio-Adapter', gameconsole: 'Spielkonsole', castvideo: 'Chromecast', castaudio: 'Chromecast', automobile: 'Auto', smartwatch: 'Uhr' };
+
+function deviceText(device) {
+  const type = DEVICE_TYPES[String(device.type || '').toLowerCase()] || 'Spotify-Gerät';
+  if (device.is_restricted) return `${type}, lässt sich nicht fernsteuern`;
+  return device.is_active ? `${type}, gerade aktiv` : type;
+}
+
+function spotifyLink() {
+  const card = S.session && L.currentCard(S.session);
+  const id = card ? L.trackId(card.uri) : '';
+  return id ? `https://open.spotify.com/track/${id}` : 'https://open.spotify.com/';
+}
+
+/** Auswahl, wo abgespielt wird, und Schalter für das automatische Anspielen. */
+async function openPlaySheet() {
+  if (document.querySelector('dialog[open]')) return;
+  clearTimeout(playTimer);
+  player.unlock();
+  const picked = await sheet((close) => {
+    const list = h('div', { class: 'list' });
+    let search = 0;
+    const refreshBtn = h('button', { class: 'btn btn--ghost', type: 'button', text: 'Aktualisieren' });
+    const fill = async () => {
+      const mine = ++search;
+      refreshBtn.disabled = true;
+      list.replaceChildren(h('p', { class: 'small', text: 'Geräte werden gesucht …' }));
+      const c = await player.choices();
+      if (mine !== search) return;
+      refreshBtn.disabled = false;
+      const option = (label, sub, selected, onPick, disabled) =>
+        h(
+          'button',
+          { class: `row option${selected ? ' is-selected' : ''}`, type: 'button', 'aria-pressed': String(selected), disabled, onclick: onPick },
+          h('div', { class: 'row__text' }, h('div', { class: 'row__title', text: label }), sub ? h('div', { class: 'row__sub', text: sub }) : null),
+          selected ? h('span', { class: 'row__end' }, icon('check', 20)) : null,
+        );
+      const rows = [
+        option('Dieser Browser', c.browser.available ? 'Spielt direkt in dieser Seite. Gedacht für den PC.' : c.browser.note, c.target === player.BROWSER, () => {
+          player.chooseBrowser();
+          close('picked');
+        }, !c.browser.available),
+      ];
+      for (const d of c.devices) {
+        rows.push(
+          option(d.name || 'Spotify-Gerät', deviceText(d), c.target === player.DEVICE && d.id === c.selectedId, () => {
+            player.chooseDevice(d);
+            close('picked');
+          }, Boolean(d.is_restricted)),
+        );
+      }
+      if (c.error) rows.push(h('p', { class: 'small warn', text: c.error }));
+      else if (c.devices.length === 0) {
+        rows.push(h('p', { class: 'small', text: 'Keine Spotify-App gefunden. Öffne Spotify auf dem Handy oder PC, starte kurz einen Titel und tippe dann auf „Aktualisieren“.' }));
+      }
+      list.replaceChildren(...rows);
+    };
+    refreshBtn.addEventListener('click', fill);
+    fill();
+    const autoSwitch = h(
+      'button',
+      {
+        class: 'switch',
+        type: 'button',
+        role: 'switch',
+        'aria-checked': String(player.autoEnabled()),
+        onclick: () => {
+          const on = !player.autoEnabled();
+          player.setAuto(on);
+          autoSwitch.setAttribute('aria-checked', String(on));
+          if (!on) player.pause();
+        },
+      },
+      h('span', { text: 'Automatisch anspielen' }),
+      h('span', { class: 'switch__knob', 'aria-hidden': 'true' }),
+    );
+    return [
+      h('h2', { class: 'h2', text: 'Anspielen' }),
+      player.needsReconnect()
+        ? h(
+            'div',
+            { class: 'box' },
+            h('p', { class: 'small', text: 'Zum Abspielen braucht Swipelist einmal zusätzliche Rechte bei Spotify. Deine angefangene Runde bleibt erhalten.' }),
+            h('button', { class: 'btn', type: 'button', text: 'Neu verbinden', onclick: () => close('reconnect') }),
+          )
+        : null,
+      autoSwitch,
+      h('p', { class: 'small', text: 'Jeder Titel startet bei ca. 35 % seiner Laufzeit. Die Stelle ist geschätzt, Spotify gibt nicht preis, welche Stelle am häufigsten gehört wird. Tippe auf die Leiste unter dem Titel, um zu springen.' }),
+      h('div', { class: 'box__label', text: 'Abspielen auf' }),
+      list,
+      h(
+        'div',
+        { class: 'btn-col' },
+        refreshBtn,
+        h('a', { class: 'btn btn--ghost', href: spotifyLink(), target: '_blank', rel: 'noopener noreferrer', text: 'Spotify öffnen' }),
+        h('button', { class: 'btn btn--text', type: 'button', text: 'Schließen', onclick: () => close(null) }),
+      ),
+    ];
+  });
+  if (picked === 'reconnect') {
+    saveDraft();
+    await connect();
+    return;
+  }
+  if (S.view !== 'swipe') return;
+  updatePlayUi();
+  if (picked === 'picked') {
+    lastAutoError = '';
+    const card = L.currentCard(S.session);
+    if (card && player.autoEnabled()) player.play(card, L.startPosition(card.durationMs));
+  } else {
+    scheduleAutoPlay();
+  }
 }
 
 /** Nach einem Mausklick den Fokus lösen, damit Leertaste oder Eingabetaste danach nicht denselben Knopf noch einmal auslösen. */
@@ -717,10 +976,35 @@ function buildCard(track, top) {
   } else {
     cover.append(noCover());
   }
+  cover.append(h('div', { class: 'card__badge', text: 'In deiner Playlist' }));
+  const d = track.durationMs || 0;
+  const start = L.startPosition(d);
+  const fill = h('div', { class: 'seek__fill' });
+  const mark = h('div', { class: 'seek__mark' });
+  if (d) mark.style.left = `${((start / d) * 100).toFixed(2)}%`;
+  else mark.hidden = true;
+  const seek = h('div', { class: 'seek' }, h('div', { class: 'seek__track' }, fill, mark));
+  const now = h('span', { text: d ? `ab ${L.formatTime(start)}` : '' });
   if (top) {
     ui.stampKeep = h('div', { class: 'stamp stamp--keep', text: 'Bleibt' });
     ui.stampRemove = h('div', { class: 'stamp stamp--remove', text: 'Raus' });
-    cover.append(ui.stampKeep, ui.stampRemove);
+    ui.playIcon = 'play';
+    ui.playBtn = h('button', { class: 'playbtn is-idle', type: 'button', 'aria-label': 'Anspielen', onclick: pointerBlur(onPlayButton) }, icon('play', 24));
+    const deviceBtn = h('button', { class: 'devbtn', type: 'button', 'aria-label': 'Anspielen einstellen und Gerät wählen', onclick: pointerBlur(openPlaySheet) }, icon('speaker', 20));
+    cover.append(ui.stampKeep, ui.stampRemove, deviceBtn, ui.playBtn);
+    seek.setAttribute('role', 'slider');
+    seek.setAttribute('aria-label', 'Stelle im Titel');
+    seek.setAttribute('aria-valuemin', '0');
+    seek.setAttribute('aria-valuemax', String(Math.round(d / 1000)));
+    seek.setAttribute('tabindex', '0');
+    seek.addEventListener('click', (event) => onSeek(event, track));
+    seek.addEventListener('keydown', (event) => onSeekKey(event, track));
+    ui.seek = seek;
+    ui.seekFill = fill;
+    ui.timeNow = now;
+  } else {
+    // Die nächste Karte zeigt dieselben Knöpfe als Bild, damit beim Nachrücken nichts aufspringt.
+    cover.append(h('div', { class: 'devbtn' }, icon('speaker', 20)), h('div', { class: 'playbtn is-idle' }, icon('play', 24)));
   }
   return h(
     'article',
@@ -729,9 +1013,10 @@ function buildCard(track, top) {
     h(
       'div',
       { class: 'card__meta' },
-      h('div', { class: 'chip', text: 'In deiner Playlist' }),
       h('div', { class: 'card__title', text: track.name }),
       h('div', { class: 'card__artist', text: L.artistText(track) }),
+      seek,
+      h('div', { class: 'times' }, now, h('span', { text: d ? L.formatTime(d) : '' })),
     ),
   );
 }
@@ -758,6 +1043,8 @@ function refreshSwipe() {
     layers.push(ui.top);
   }
   ui.stack.replaceChildren(...layers);
+  updatePlayUi();
+  scheduleAutoPlay();
 }
 
 // ----- Wischen -----
@@ -778,6 +1065,8 @@ function attachDrag(card) {
 
   card.addEventListener('pointerdown', (event) => {
     if (S.animating || pointerId !== null) return;
+    // Knöpfe und die Leiste auf der Karte lösen kein Wischen aus.
+    if (event.target.closest('button, .seek')) return;
     if (event.pointerType === 'mouse' && event.button !== 0) return;
     pointerId = event.pointerId;
     startX = event.clientX;
@@ -836,6 +1125,7 @@ function flyOut(action) {
 async function commit(action) {
   const session = S.session;
   if (S.view !== 'swipe' || S.animating || !L.currentCard(session)) return;
+  player.unlock();
   S.animating = true;
   // Die Entscheidung gilt sofort, nicht erst nach der Animation. So geht sie auch bei einem schnellen Wechsel der Ansicht nicht verloren.
   L.decide(session, action);
@@ -849,6 +1139,7 @@ async function commit(action) {
 
 function undoLast() {
   if (S.view !== 'swipe' || S.animating) return;
+  player.unlock();
   if (!L.undo(S.session)) return;
   saveDraft();
   refreshSwipe();
@@ -864,6 +1155,12 @@ document.addEventListener('keydown', (event) => {
   } else if (event.key === 'z' || event.key === 'Z' || event.key === 'Backspace') {
     event.preventDefault();
     undoLast();
+  } else if (event.key === ' ' || event.code === 'Space') {
+    // Leertaste: Anspielen oder Pause. Liegt der Fokus auf einem Knopf, löst die Leertaste diesen Knopf aus.
+    const el = document.activeElement;
+    if (el && el !== document.body && el.closest('button, a, input')) return;
+    event.preventDefault();
+    if (!event.repeat) onPlayButton();
   }
 });
 
@@ -1253,6 +1550,7 @@ function showSettings() {
             onclick: async () => {
               const ok = await ask({ title: 'Abmelden?', text: LOGOUT_TEXT, yes: 'Abmelden' });
               if (!ok) return;
+              player.reset();
               sp.logout();
               resetState();
               showLogin();
@@ -1327,6 +1625,10 @@ async function runDiagnose(log) {
     line(null, 'Spotify', 'übersprungen, nicht angemeldet');
     return;
   }
+  const missing = L.missingScopes(sp.grantedScopes(), sp.PLAY_SCOPES);
+  line(missing.length === 0, 'Rechte für das Anspielen', missing.length === 0 ? 'vollständig' : `es fehlen: ${missing.join(', ')} (in der App neu verbinden)`);
+  const sdk = player.sdkInfo();
+  line(null, 'Abspielen', `Weg: ${player.target() === player.BROWSER ? 'dieser Browser' : 'Spotify-App'}, Browser-Player: ${sdk.state}${sdk.failKind ? ` (${sdk.failKind})` : ''}, Touch: ${player.isTouch() ? 'ja' : 'nein'}`);
 
   const found = { meId: S.me ? S.me.id : null, artist: null, albumId: null };
   const skip = 'übersprungen, kein Künstler aus den vorigen Schritten';
@@ -1421,6 +1723,7 @@ async function runDiagnose(log) {
 
 // Kommt die App nach längerer Pause wieder in den Vordergrund, die Playlist-Liste auffrischen.
 document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && S.view === 'swipe') player.sync();
   if (document.visibilityState === 'visible' && S.view === 'playlists' && !document.querySelector('dialog[open]') && Date.now() - S.playlistsAt > LIST_MAX_AGE_MS) {
     showPlaylists();
   }

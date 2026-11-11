@@ -323,7 +323,7 @@ dialog.sheet::backdrop { background: rgba(0, 0, 0, 0.66); }
 /* ---------- Swipe-Screen ---------- */
 
 .view--swipe {
-  --chrome: 324px;
+  --chrome: 334px;
   --card-w: max(220px, min(calc(100vw - 32px), 398px, calc(var(--vh) - var(--chrome) - var(--safe-top) - var(--safe-bottom))));
   height: var(--vh);
   min-height: 0;
@@ -331,7 +331,7 @@ dialog.sheet::backdrop { background: rgba(0, 0, 0, 0.66); }
   touch-action: pan-y;
 }
 
-.stack { position: relative; width: var(--card-w); height: calc(var(--card-w) + 124px); margin: 20px auto 0; flex-shrink: 0; }
+.stack { position: relative; width: var(--card-w); height: calc(var(--card-w) + 134px); margin: 20px auto 0; flex-shrink: 0; }
 .stack__edge { position: absolute; height: 120px; border-radius: 28px; }
 .stack__edge--back { left: 28px; right: 28px; top: 0; background: var(--card-back); }
 .stack__edge--mid { left: 14px; right: 14px; top: 10px; background: var(--card-mid); }
@@ -381,9 +381,62 @@ dialog.sheet::backdrop { background: rgba(0, 0, 0, 0.66); }
 .stamp--remove { right: 16px; background: var(--remove); }
 
 .card__meta { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; padding: 0 8px; }
-.chip { height: 24px; display: flex; align-items: center; margin-top: 16px; padding: 0 10px; border-radius: 12px; background: var(--chip); color: var(--soft); font-size: 12px; font-weight: 600; }
-.card__title { max-width: 100%; margin-top: 8px; font-family: var(--display); font-size: 24px; line-height: 30px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card__title { max-width: 100%; margin-top: 14px; font-family: var(--display); font-size: 24px; line-height: 30px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card__artist { max-width: 100%; margin-top: 2px; font-size: 15px; line-height: 20px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.card__badge {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: 14px;
+  background: rgba(23, 23, 26, 0.82);
+  color: var(--soft);
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.playbtn {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--light);
+  color: var(--bg);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  transition: transform 0.12s ease;
+}
+.playbtn:active { transform: scale(0.94); }
+.playbtn.is-starting svg { animation: pulse 0.8s ease-in-out infinite alternate; }
+.playbtn.is-error { background: var(--warn); }
+.devbtn {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(23, 23, 26, 0.72);
+  color: var(--text);
+}
+.seek { align-self: stretch; height: 32px; margin-top: 0; display: flex; align-items: center; cursor: pointer; touch-action: manipulation; }
+.card--next .seek { cursor: default; }
+.seek__track { position: relative; width: 100%; height: 4px; border-radius: 2px; background: var(--chip); }
+.seek__fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 2px; background: var(--keep); }
+.seek__mark { position: absolute; top: -3px; width: 3px; height: 10px; border-radius: 2px; background: var(--light); transform: translateX(-50%); }
+.times { align-self: stretch; display: flex; justify-content: space-between; font-size: 12px; line-height: 16px; color: var(--muted); font-variant-numeric: tabular-nums; }
+@keyframes pulse { from { opacity: 1; } to { opacity: 0.35; } }
 
 .actions { display: flex; align-items: flex-start; justify-content: center; gap: 22px; margin-top: auto; padding-top: 16px; }
 .act { width: 96px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
@@ -397,13 +450,13 @@ dialog.sheet::backdrop { background: rgba(0, 0, 0, 0.66); }
 
 .keys { display: none; margin-top: 12px; text-align: center; font-size: 12px; line-height: 16px; color: var(--muted); }
 @media (hover: hover) and (pointer: fine) {
-  .view--swipe { --chrome: 352px; }
+  .view--swipe { --chrome: 362px; }
   .keys { display: block; }
 }
 
 /* Niedrige Bildschirme (Handy im Browser mit Adressleiste): kleinere Knöpfe, mehr Platz für das Cover. */
 @media (max-height: 720px) {
-  .view--swipe { --chrome: 276px; }
+  .view--swipe { --chrome: 286px; }
   .stack { margin-top: 12px; }
   .actions { padding-top: 12px; }
   .act { width: 80px; }
@@ -412,6 +465,31 @@ dialog.sheet::backdrop { background: rgba(0, 0, 0, 0.66); }
   .undo { margin-top: 4px; }
   .keys { display: none; }
 }
+
+/* ---------- Anspielen: Auswahl ---------- */
+
+.switch {
+  width: 100%;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px;
+  border-radius: 16px;
+  background: var(--surface);
+  font-size: 16px;
+  font-weight: 600;
+  text-align: left;
+}
+.switch__knob { position: relative; width: 46px; height: 28px; border-radius: 14px; background: var(--chip); flex-shrink: 0; transition: background 0.15s ease; }
+.switch__knob::after { content: ''; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--light); transition: transform 0.15s ease; }
+.switch[aria-checked='true'] .switch__knob { background: var(--keep); }
+.switch[aria-checked='true'] .switch__knob::after { transform: translateX(18px); background: var(--bg); }
+.option { min-height: 56px; padding: 8px 12px 8px 16px; border: 1.5px solid transparent; }
+.option.is-selected { border-color: var(--light); }
+.option.is-selected .row__end { color: var(--text); }
+a.btn { text-decoration: none; }
 
 /* ---------- Prüfliste und Ergebnis ---------- */
 
@@ -426,6 +504,7 @@ dialog.sheet::backdrop { background: rgba(0, 0, 0, 0.66); }
 .result-icon { width: 72px; height: 72px; border-radius: 50%; background: var(--keep); color: var(--bg); display: flex; align-items: center; justify-content: center; }
 
 @media (prefers-reduced-motion: reduce) {
-  .card.is-flying, .card.is-returning, .toast, .act__btn { transition: none; }
+  .card.is-flying, .card.is-returning, .toast, .act__btn, .playbtn, .switch__knob, .switch__knob::after { transition: none; }
+  .playbtn.is-starting svg { animation: none; opacity: 0.6; }
   .spinner { animation-duration: 2s; }
 }

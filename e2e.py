@@ -11,7 +11,7 @@ from urllib.parse import urlparse, parse_qs
 
 from playwright.sync_api import sync_playwright, expect
 
-from mock import World, APP, CORS, make_png, entry, track_obj
+from mock import World, APP, CORS, make_png, entry, track_obj, fake_sdk
 
 SHOTS = os.path.join(os.path.dirname(__file__), "shots")
 os.makedirs(SHOTS, exist_ok=True)
@@ -29,11 +29,15 @@ def make_handler(world, auth_log):
     def handle(route, request):
         url = request.url
         try:
+            if url == APP + "/config.js":
+                # Die Tests beginnen mit der Einrichtung, deshalb ohne fest eingetragene Client-ID.
+                return route.fulfill(status=200, headers={"Content-Type": "text/javascript"}, body="window.SWIPE_CONFIG = { clientId: '' };")
             if url.startswith(APP):
                 return route.continue_()
             if url.startswith("https://accounts.spotify.com/authorize"):
                 q = {k: v[0] for k, v in parse_qs(urlparse(url).query).items()}
                 auth_log.append(q)
+                world.scope = q.get("scope", "")
                 return route.fulfill(status=302, headers={"Location": f"{q['redirect_uri']}?code=CODE123&state={q['state']}"})
             if url.startswith("https://accounts.spotify.com/api/token"):
                 if request.method == "OPTIONS":
@@ -44,6 +48,11 @@ def make_handler(world, auth_log):
                 status, data, extra = world.spotify(request.method, url, request.headers, request.post_data)
                 return route.fulfill(status=status, headers={**CORS, **extra, "Content-Type": "application/json"},
                                      body=json.dumps(data) if data is not None else "")
+            if url == "https://sdk.scdn.co/spotify-player.js":
+                world.sdk_ready = world.sdk_mode == "ok"
+                return route.fulfill(status=200, headers={"Content-Type": "text/javascript"}, body=fake_sdk(world.sdk_mode))
+            if url == "https://sdk.scdn.co/embedded/index.html":
+                return route.fulfill(status=200, headers={"Content-Type": "text/html"}, body="<!doctype html><title>sdk</title>")
             if url.startswith("https://i.scdn.co/image/"):
                 n = url.rsplit("/", 1)[1].split("-")[0]
                 if n in world.no_cover:
@@ -386,9 +395,10 @@ def run_mobile(browser):
     a = auth_log[0]
     check("Anmeldung: PKCE-Parameter vollständig", a["response_type"] == "code" and a["code_challenge_method"] == "S256" and len(a["code_challenge"]) == 43
           and a["client_id"] == CLIENT_ID and a["redirect_uri"] == APP + "/", str(a))
-    check("Anmeldung: genau die benötigten Rechte, keine Wiedergabe-Steuerung", sorted(a["scope"].split()) == sorted([
+    check("Anmeldung: genau die benötigten Rechte", sorted(a["scope"].split()) == sorted([
         "playlist-read-private", "playlist-read-collaborative", "playlist-modify-private", "playlist-modify-public",
-        "user-top-read", "user-read-recently-played", "user-library-read", "user-read-playback-state"]), a["scope"])
+        "user-top-read", "user-read-recently-played", "user-library-read", "user-read-playback-state",
+        "user-modify-playback-state", "streaming", "user-read-private", "user-read-email"]), a["scope"])
     t = world.token_calls[0]
     check("Anmeldung: Code-Tausch ohne geheimen Schlüssel", t["grant_type"] == "authorization_code" and "client_secret" not in t and len(t["code_verifier"]) == 64)
     check("Adresszeile nach Anmeldung bereinigt", page.url == APP + "/", page.url)
@@ -612,7 +622,7 @@ def run_mobile(browser):
     check("Selbsttest: keine Künstler-, Titel- oder Gerätenamen im Ergebnis", not any(w in out for w in ["Nicos", "Kollektiv", "Nachtbus", "Album 1"]))
     check("Selbsttest ändert nichts", len(world.writes) == writes_before_diag, str(world.writes[writes_before_diag:]))
     page.get_by_role("button", name="Ergebnis kopieren").click()
-    check("Ergebnis lässt sich kopieren", page.evaluate("navigator.clipboard.readText()").startswith("Swipelist 0.1.0"))
+    check("Ergebnis lässt sich kopieren", page.evaluate("navigator.clipboard.readText()").startswith("Swipelist 0.2.0"))
     page.screenshot(path=f"{SHOTS}/11-diagnose.png", full_page=True)
     page.get_by_role("button", name="Zurück").click()
     page.get_by_role("button", name="Abmelden").click()
@@ -642,7 +652,7 @@ def run_small(browser):
     fits = page.evaluate("(() => { const a = document.querySelector('.actions').getBoundingClientRect(); const s = document.querySelector('.stack').getBoundingClientRect(); return a.bottom <= window.innerHeight && s.bottom <= a.top && document.documentElement.scrollHeight <= window.innerHeight; })()")
     width = page.evaluate("document.querySelector('.card--top').getBoundingClientRect().width")
     check("390x664: alles sichtbar ohne Scrollen, Karte in voller Breite", fits and width == 358, f"{fits} {width}")
-    check("Kein Abspielknopf und kein Tonelement in dieser Ausbaustufe", page.evaluate("document.querySelector('.card__play, audio, iframe') === null"))
+    check("Abspielknopf liegt auf dem Cover, kein eigenes Tonelement", page.evaluate("(() => { const b = document.querySelector('.card--top .playbtn').getBoundingClientRect(); const c = document.querySelector('.card--top .card__cover').getBoundingClientRect(); return b.right <= c.right && b.bottom <= c.bottom && document.querySelector('audio') === null; })()"))
     page.screenshot(path=f"{SHOTS}/20-small-664.png")
     page.set_viewport_size({"width": 375, "height": 553})
     time.sleep(0.4)
@@ -743,6 +753,285 @@ def run_auth_errors(browser):
     ctx.close()
 
 
+def play_count_settles(page, world, n, timeout=4.0):
+    # Nicht time.sleep: Die nachgebaute Schnittstelle antwortet nur, während Playwright arbeitet.
+    end = time.time() + timeout
+    while time.time() < end and len(world.plays) < n:
+        page.wait_for_timeout(50)
+    return len(world.plays) >= n
+
+
+def current_uri(page):
+    name = title(page)
+    num = int(name.split()[-1])
+    return f"spotify:track:t{num:03d}"
+
+
+def start_pos(n):
+    d = 200000 + n
+    return max(0, min(round(d * 0.35), d - 25000))
+
+
+def run_playback(browser):
+    print("\n== Anspielen: Handy steuert die Spotify-App ==")
+    world, auth_log, console = World(), [], []
+    ctx, page = new_page(browser, world, auth_log, console, {"width": 390, "height": 844}, True)
+    login(page, world, auth_log)
+    page.get_by_role("button", name="Roadtrip").click()
+    page.get_by_role("button", name="20", exact=True).click()
+    page.get_by_role("button", name="Runde starten").click()
+    page.wait_for_selector(".card--top")
+    check("Handy: erster Titel wird automatisch angespielt", play_count_settles(page, world, 1), str(world.plays))
+    n = int(title(page).split()[-1])
+    check("Handy: auf dem Handy (Smartphone vor aktivem Computer)", world.plays and world.plays[0][0] == "d2", str(world.plays))
+    check("Handy: richtiger Titel ab ca. 35 %", world.plays and world.plays[0][1:] == (current_uri(page), start_pos(n)), f"{world.plays} {start_pos(n)}")
+    check("Handy: kein Browser-Player geladen", page.evaluate("document.querySelector('iframe, script[src*=\"sdk.scdn.co\"]') === null"))
+    page.wait_for_function("() => document.querySelector('.card--top .playbtn').getAttribute('aria-label') === 'Pause'")
+    page.wait_for_timeout(1200)
+    shown = page.locator(".card--top .times span").first.inner_text()
+    check("Handy: Zeitanzeige läuft ab der Startstelle", shown in ("1:10", "1:11", "1:12"), shown)
+    page.screenshot(path=f"{SHOTS}/40-play-mobile.png")
+
+    # Pause und weiter
+    page.locator(".card--top .playbtn").click()
+    page.wait_for_timeout(400)
+    check("Pause wird an Spotify geschickt", world.player_calls and world.player_calls[-1][:2] == ("pause", "d2"), str(world.player_calls))
+    check("Knopf zeigt danach „Weiter abspielen“", page.locator(".card--top .playbtn").get_attribute("aria-label") == "Weiter abspielen")
+    before = len(world.plays)
+    page.locator(".card--top .playbtn").click()
+    play_count_settles(page, world, before + 1)
+    resumed = world.plays[-1][2] if len(world.plays) > before else -1
+    check("Weiter abspielen setzt an der gemerkten Stelle fort", start_pos(n) + 1000 <= resumed <= start_pos(n) + 3000, str(resumed))
+
+    # Springen über die Leiste
+    box = page.locator(".card--top .seek").bounding_box()
+    page.mouse.click(box["x"] + box["width"] * 0.5, box["y"] + box["height"] / 2)
+    page.wait_for_timeout(400)
+    # Läuft der Titel schon, kommt ein Sprungbefehl; startet er gerade noch, ein neuer Abspielbefehl an der Stelle.
+    jumps = [c[2] for c in world.player_calls if c[0] == "seek"] + [p[2] for p in world.plays[-1:]]
+    check("Tippen auf die Leiste springt zur Stelle", any(abs(j - (200000 + n) / 2) < 3000 for j in jumps), str(jumps))
+    check("Tippen auf die Leiste entscheidet nichts", counter(page) == "1 von 20")
+
+    # Wischen: nächster Titel startet automatisch
+    before = len(world.plays)
+    press(page, "Behalten")
+    play_count_settles(page, world, before + 1)
+    check("Nach dem Wischen startet der nächste Titel", len(world.plays) == before + 1 and world.plays[-1][1] == current_uri(page), str(world.plays[before:]))
+
+    # Schnelles Wischen startet nicht jeden Titel einzeln
+    before = len(world.plays)
+    page.keyboard.press("ArrowRight"); page.wait_for_timeout(270)
+    page.keyboard.press("ArrowRight")
+    page.wait_for_timeout(1200)
+    check("Schnelles Wischen: nur der zuletzt gezeigte Titel startet", len(world.plays) == before + 1 and world.plays[-1][1] == current_uri(page), str(world.plays[before:]))
+
+    # Prüfliste hält an
+    calls = len(world.player_calls)
+    page.get_by_role("button", name="Fertig").click()
+    wait_view(page, "Änderungen prüfen")
+    page.wait_for_timeout(400)
+    check("Prüfliste hält die Wiedergabe an", world.player_calls[calls:] == [("pause", "d2", None)], str(world.player_calls[calls:]))
+
+    # Kein Gerät erreichbar
+    saved = world.devices
+    world.devices = []
+    page.get_by_role("button", name="Weiter swipen").last.click()
+    page.wait_for_selector(".card--top")
+    wait_toast(page, "Kein Spotify-Gerät erreichbar")
+    check("Ohne Gerät: verständlicher Hinweis", True)
+    check("Ohne Gerät: Knopf zeigt den Fehler", page.locator(".card--top .playbtn").get_attribute("aria-label") == "Erneut anspielen")
+    log_before = len(world.log)
+    press(page, "Behalten")
+    page.wait_for_timeout(800)
+    check("Ohne Gerät: kein weiterer Versuch bei jeder Karte", len(world.log) == log_before, str(world.log[log_before:]))
+    world.devices = saved
+
+    # Gerät wählen
+    page.get_by_role("button", name="Anspielen einstellen und Gerät wählen").click()
+    page.wait_for_selector("dialog[open] .option")
+    page.wait_for_function("() => document.querySelectorAll('dialog[open] .option').length === 3")
+    page.screenshot(path=f"{SHOTS}/41-play-sheet.png")
+    opts = page.locator("dialog[open] .option .row__title").all_inner_texts()
+    check("Auswahl: Browser und beide Spotify-Geräte", opts == ["Dieser Browser", "Nicos Rechner", "Nicos Handy"], str(opts))
+    before = len(world.plays)
+    page.locator("dialog[open] .option", has_text="Nicos Rechner").click()
+    play_count_settles(page, world, before + 1)
+    check("Gewähltes Gerät spielt sofort", world.plays[-1][0] == "d1" and world.plays[-1][1] == current_uri(page), str(world.plays[-1:]))
+
+    # Ausdrücklich gewähltes Gerät verschwindet: kein stilles Ausweichen auf ein anderes Gerät
+    world.devices = [d for d in saved if d["id"] != "d1"]
+    before = len(world.plays)
+    press(page, "Behalten")
+    wait_toast(page, "„Nicos Rechner“ ist gerade nicht erreichbar")
+    check("Gewähltes Gerät weg: Hinweis statt Ausweichen auf ein anderes Gerät", len(world.plays) == before, str(world.plays[before:]))
+    check("Gewähltes Gerät bleibt gespeichert", page.evaluate("JSON.parse(localStorage.getItem('sw.play')).deviceId") == "d1")
+    world.devices = saved
+    page.locator(".card--top .playbtn").click()
+    play_count_settles(page, world, before + 1)
+    check("Gerät wieder da: Abspielknopf spielt dort", world.plays[-1][0] == "d1", str(world.plays[before:]))
+
+    # Automatik aus
+    page.get_by_role("button", name="Anspielen einstellen und Gerät wählen").click()
+    page.wait_for_selector("dialog[open] .switch")
+    page.locator("dialog[open] .switch").click()
+    check("Schalter zeigt „aus“", page.locator("dialog[open] .switch").get_attribute("aria-checked") == "false")
+    page.get_by_role("button", name="Schließen").click()
+    before = len(world.plays)
+    page.keyboard.press("ArrowLeft")
+    page.wait_for_timeout(1000)
+    check("Automatik aus: kein Anspielen beim Wischen", len(world.plays) == before, str(world.plays[before:]))
+    check("Automatik aus bleibt nach Neuladen gespeichert", page.evaluate("JSON.parse(localStorage.getItem('sw.play')).auto === false"))
+    page.locator(".card--top .playbtn").click()
+    play_count_settles(page, world, before + 1)
+    check("Automatik aus: Abspielknopf spielt trotzdem", len(world.plays) == before + 1)
+    ctx.close()
+
+    print("\n== Anspielen: PC im Browser ==")
+    world, auth_log, console = World(), [], []
+    ctx, page = new_page(browser, world, auth_log, console, {"width": 1280, "height": 800}, False)
+    login(page, world, auth_log)
+    page.get_by_role("button", name="Gym").click()
+    page.get_by_role("button", name="Runde starten").click()
+    page.wait_for_selector(".card--top")
+    check("PC: Titel spielt im Browser-Player", play_count_settles(page, world, 1) and world.plays[0][0] == "sdk-dev", str(world.plays))
+    check("PC: Browser-Player bekommt das Zugangs-Token", page.evaluate("window.__sdkToken") == "AT1")
+    check("PC: Rahmen des Browser-Players erlaubt (Schutzregel)", page.evaluate("document.querySelector('iframe[src^=\"https://sdk.scdn.co/\"]') !== null"))
+    page.keyboard.press("Space")
+    page.wait_for_timeout(300)
+    check("PC: Leertaste pausiert im Browser", "pause" in page.evaluate("window.__sdkCalls"), str(page.evaluate("window.__sdkCalls")))
+    page.keyboard.press("ArrowRight")
+    page.wait_for_timeout(200)
+    check("PC: Tastendruck schaltet den Ton frei (activateElement)", "activateElement" in page.evaluate("window.__sdkCalls"))
+    page.screenshot(path=f"{SHOTS}/42-play-desktop.png")
+    csp = [m for m in console if "Content Security Policy" in m[1] or "Refused to" in m[1]]
+    check("PC: keine Verstöße gegen die Schutzregel", not csp, str(csp))
+    ctx.close()
+
+    print("\n== Anspielen: Browser kann nicht selbst abspielen ==")
+    world, auth_log, console = World(), [], []
+    world.sdk_mode = "unsupported"
+    ctx, page = new_page(browser, world, auth_log, console, {"width": 1280, "height": 800}, False)
+    login(page, world, auth_log)
+    page.get_by_role("button", name="Gym").click()
+    page.get_by_role("button", name="Runde starten").click()
+    page.wait_for_selector(".card--top")
+    page.wait_for_timeout(400)
+    page.locator(".card--top .playbtn").click()
+    play_count_settles(page, world, 1)
+    check("Ohne Browser-Player: Spotify-App am PC übernimmt", world.plays and world.plays[-1][0] == "d1", str(world.plays))
+    ctx.close()
+
+    print("\n== Anspielen: Premium fehlt ==")
+    world, auth_log, console = World(), [], []
+    world.play_fail = {"status": 403, "reason": "PREMIUM_REQUIRED", "message": "Player command failed: Premium required"}
+    ctx, page = new_page(browser, world, auth_log, console, {"width": 390, "height": 844}, True)
+    login(page, world, auth_log)
+    page.get_by_role("button", name="Gym").click()
+    page.get_by_role("button", name="Runde starten").click()
+    page.wait_for_selector(".card--top")
+    wait_toast(page, "nur mit Spotify Premium")
+    check("Ohne Premium: klare Meldung", True)
+    ctx.close()
+
+    print("\n== Anspielen: alter Zugang ohne Abspielrechte ==")
+    world, auth_log, console = World(), [], []
+    world.scope_override = "playlist-read-private playlist-modify-private user-read-playback-state"
+    ctx, page = new_page(browser, world, auth_log, console, {"width": 390, "height": 844}, True)
+    login(page, world, auth_log)
+    page.get_by_role("button", name="Gym").click()
+    page.get_by_role("button", name="Runde starten").click()
+    page.wait_for_selector(".card--top")
+    wait_toast(page, "zusätzliche Rechte")
+    page.wait_for_timeout(600)
+    check("Alter Zugang: kein Abspielversuch", world.plays == [], str(world.plays))
+    press(page, "Entfernen")
+    page.locator(".card--top .playbtn").click()
+    page.wait_for_selector("dialog[open]")
+    check("Alter Zugang: Abspielknopf erklärt und bietet „Neu verbinden“", page.get_by_role("button", name="Neu verbinden").is_visible())
+    world.scope_override = None
+    page.get_by_role("button", name="Neu verbinden").click()
+    wait_view(page, "Playlists")
+    page.wait_for_selector("button.row")
+    check("Neu verbinden fragt die Abspielrechte an", "streaming" in auth_log[-1]["scope"].split())
+    check("Angefangene Runde bleibt nach dem Neuverbinden erhalten", "Angefangene Runde" in page.inner_text("body"), page.inner_text("body")[:300])
+    ctx.close()
+
+
+def run_races(browser):
+    print("\n== Anspielen: Wettläufe ==")
+    # Verlassen, während die Geräteliste noch unterwegs ist: danach darf kein Abspielbefehl mehr rausgehen.
+    world, auth_log, console = World(), [], []
+    ctx, page = new_page(browser, world, auth_log, console, {"width": 390, "height": 844}, True)
+    base = make_handler(world, auth_log)
+    held = []
+
+    def handler(route, request):
+        if request.url.startswith("https://api.spotify.com/v1/me/player/devices") and request.method == "GET" and not held:
+            held.append(route)
+            return
+        return base(route, request)
+
+    ctx.unroute("**/*")
+    ctx.route("**/*", handler)
+    login(page, world, auth_log)
+    page.get_by_role("button", name="Roadtrip").click()
+    page.get_by_role("button", name="20", exact=True).click()
+    page.get_by_role("button", name="Runde starten").click()
+    page.wait_for_selector(".card--top")
+    end = time.time() + 4
+    while not held and time.time() < end:
+        page.wait_for_timeout(50)
+    page.get_by_role("button", name="Zur Playlist-Auswahl").click()
+    page.wait_for_timeout(300)
+    route = held.pop()
+    base(route, route.request)
+    page.wait_for_timeout(800)
+    check("Verlassen während der Gerätesuche: kein verspäteter Abspielbefehl", world.plays == [], str(world.plays))
+    ctx.close()
+
+    # Wechsel scheitert, alter Titel lief: Beim Verlassen wird er trotzdem angehalten.
+    world, auth_log, console = World(), [], []
+    ctx, page = new_page(browser, world, auth_log, console, {"width": 390, "height": 844}, True)
+    login(page, world, auth_log)
+    page.get_by_role("button", name="Roadtrip").click()
+    page.get_by_role("button", name="20", exact=True).click()
+    page.get_by_role("button", name="Runde starten").click()
+    page.wait_for_selector(".card--top")
+    play_count_settles(page, world, 1)
+    page.wait_for_timeout(300)
+    world.play_fail = {"status": 502, "message": "Bad gateway"}
+    press(page, "Behalten")
+    page.wait_for_timeout(1200)
+    check("Gescheiterter Wechsel: alter Titel wird angehalten", world.player_calls and world.player_calls[-1][:2] == ("pause", "d2"), str(world.player_calls))
+    check("Gescheiterter Wechsel: Karte zeigt den Fehler", page.locator(".card--top .playbtn").get_attribute("aria-label") == "Erneut anspielen")
+    ctx.close()
+
+    # Leiste per Tastatur
+    world, auth_log, console = World(), [], []
+    ctx, page = new_page(browser, world, auth_log, console, {"width": 1280, "height": 800}, False)
+    login(page, world, auth_log)
+    page.get_by_role("button", name="Gym").click()
+    page.get_by_role("button", name="Runde starten").click()
+    page.wait_for_selector(".card--top")
+    play_count_settles(page, world, 1)
+    page.wait_for_timeout(300)
+    page.locator(".card--top .seek").focus()
+    before_counter = counter(page)
+    page.keyboard.press("ArrowRight")
+    page.wait_for_timeout(500)
+    calls = page.evaluate("window.__sdkCalls")
+    check("Leiste per Tastatur erreichbar und Pfeil springt 10 s", page.evaluate("document.querySelector('.card--top .seek').tabIndex") == 0 and any(c.startswith("seek:") for c in calls), str(calls))
+    check("Pfeil auf der Leiste wischt nicht", counter(page) == before_counter)
+    # Abmelden trennt den Browser-Player
+    page.get_by_role("button", name="Zur Playlist-Auswahl").click()
+    page.get_by_role("button", name="Einstellungen").click()
+    page.get_by_role("button", name="Abmelden").click()
+    page.locator("dialog[open]").get_by_role("button", name="Abmelden").click()
+    wait_view(page, "Mit Spotify verbinden")
+    check("Abmelden trennt den Browser-Player", "disconnect" in page.evaluate("window.__sdkCalls"))
+    ctx.close()
+
+
 def main():
     server = subprocess.Popen([sys.executable, "-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -751,7 +1040,7 @@ def main():
         with sync_playwright() as pw:
             chrome = "/usr/bin/google-chrome"
             browser = pw.chromium.launch(executable_path=chrome, headless=True) if os.path.exists(chrome) else pw.chromium.launch(headless=True)
-            for run in (run_mobile, run_small, run_desktop, run_auth_errors, run_safety):
+            for run in (run_mobile, run_small, run_desktop, run_auth_errors, run_safety, run_playback, run_races):
                 try:
                     run(browser)
                 except Exception as exc:

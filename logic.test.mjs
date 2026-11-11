@@ -221,3 +221,42 @@ test('Texte: Mehrzahl und Wartezeit', () => {
   assert.equal(L.waitText(61887), 'ca. 17 Stunden');
   assert.equal(L.archiveName('Roadtrip'), 'Roadtrip Archiv');
 });
+
+test('startPosition: ca. 35 %, bei kurzen Titeln früher, nie negativ', () => {
+  assert.equal(L.startPosition(200000), 70000);
+  assert.equal(L.startPosition(60000), 21000);
+  assert.equal(L.startPosition(30000), 5000);
+  assert.equal(L.startPosition(20000), 0);
+  assert.equal(L.startPosition(0), 0);
+  assert.equal(L.startPosition(undefined), 0);
+});
+
+test('formatTime und trackId', () => {
+  assert.equal(L.formatTime(67000), '1:07');
+  assert.equal(L.formatTime(0), '0:00');
+  assert.equal(L.formatTime(3725000), '62:05');
+  assert.equal(L.trackId('spotify:track:abc123'), 'abc123');
+  assert.equal(L.trackId('spotify:episode:abc'), '');
+});
+
+test('missingScopes erkennt fehlende Rechte', () => {
+  assert.deepEqual(L.missingScopes('a b c', ['a', 'c']), []);
+  assert.deepEqual(L.missingScopes('a  b', ['a', 'd']), ['d']);
+  assert.deepEqual(L.missingScopes(undefined, ['a']), ['a']);
+});
+
+test('pickDevice: gewähltes, dann passender Typ, dann aktives, nie gesperrt', () => {
+  const pc = { id: 'pc', type: 'Computer', is_active: true };
+  const phone = { id: 'ph', type: 'Smartphone', is_active: false };
+  const phone2 = { id: 'ph2', type: 'Smartphone', is_active: true };
+  const tv = { id: 'tv', type: 'TV', is_active: true, is_restricted: true };
+  const speaker = { id: 'sp', type: 'Speaker', is_active: true };
+  assert.equal(L.pickDevice([pc, phone], 'pc', true).id, 'pc');
+  assert.equal(L.pickDevice([pc, phone], 'weg', true).id, 'ph');
+  assert.equal(L.pickDevice([pc, phone, phone2], null, true).id, 'ph2');
+  assert.equal(L.pickDevice([pc, phone], null, false).id, 'pc');
+  assert.equal(L.pickDevice([phone, speaker], null, false).id, 'sp');
+  assert.equal(L.pickDevice([tv], null, true), null);
+  assert.equal(L.pickDevice([], null, true), null);
+  assert.equal(L.pickDevice(null, null, true), null);
+});

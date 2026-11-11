@@ -8,8 +8,12 @@ const AUTH_URL = 'https://accounts.spotify.com/authorize';
 const TOKEN_URL = 'https://accounts.spotify.com/api/token';
 const API_URL = 'https://api.spotify.com/v1';
 
+// Rechte für das Anspielen: Wiedergabe auf Spotify-Geräten steuern und im Browser abspielen.
+// Das Abspielen im Browser (Web Playback SDK) verlangt zusätzlich die Kontodaten-Rechte user-read-private und user-read-email.
+export const PLAY_SCOPES = ['user-modify-playback-state', 'streaming', 'user-read-private', 'user-read-email'];
+
 // Was die App bei Spotify darf: eigene Playlists lesen und ändern.
-// Nur lesend, für spätere Vorschläge und das Anspielen: Hörstatistik, gespeicherte Titel, Abspielgeräte samt Wiedergabestand.
+// Nur lesend, für spätere Vorschläge: Hörstatistik, gespeicherte Titel, Abspielgeräte samt Wiedergabestand.
 export const SCOPES = [
   'playlist-read-private',
   'playlist-read-collaborative',
@@ -19,6 +23,7 @@ export const SCOPES = [
   'user-read-recently-played',
   'user-library-read',
   'user-read-playback-state',
+  ...PLAY_SCOPES,
 ];
 
 export class ApiError extends Error {
@@ -97,12 +102,20 @@ export async function beginLogin(clientId) {
   window.location.assign(`${AUTH_URL}?${params}`);
 }
 
-function saveTokens(data, previousRefresh) {
+function saveTokens(data, previous) {
   return store.set('auth', {
     access: data.access_token,
-    refresh: data.refresh_token || previousRefresh || null,
+    refresh: data.refresh_token || (previous && previous.refresh) || null,
     expiresAt: Date.now() + (Number(data.expires_in) || 3600) * 1000,
+    // Erteilte Rechte. Fehlt die Angabe in der Antwort, gelten die bisherigen weiter.
+    scope: typeof data.scope === 'string' ? data.scope : (previous && previous.scope) || null,
   });
+}
+
+/** Die bei der Anmeldung erteilten Rechte (durch Leerzeichen getrennt) oder null, wenn unbekannt. */
+export function grantedScopes() {
+  const auth = store.get('auth');
+  return auth && typeof auth.scope === 'string' ? auth.scope : null;
 }
 
 async function tokenRequest(fields) {
@@ -162,7 +175,7 @@ async function refreshTokens() {
   }
   try {
     const data = await tokenRequest({ grant_type: 'refresh_token', refresh_token: auth.refresh, client_id: clientId });
-    saveTokens(data, auth.refresh);
+    saveTokens(data, auth);
     return data.access_token;
   } catch (err) {
     // Nur bei einer echten Absage von Spotify abmelden, nicht bei fehlender Verbindung.
@@ -180,7 +193,7 @@ function refresh() {
   return refreshing;
 }
 
-async function accessToken() {
+export async function accessToken() {
   const auth = store.get('auth');
   if (!auth || !auth.refresh) throw new ApiError(401, 'Nicht angemeldet.', { relogin: true });
   if (auth.access && auth.expiresAt - Date.now() > 60000) return auth.access;
@@ -217,9 +230,9 @@ async function request(method, path, { query, body } = {}, attempt = 0) {
     /* Antwort ohne lesbaren Inhalt */
   }
 
+  const reason = (data && (data.reason || (data.error && data.error.reason))) || '';
   if (res.status === 429) {
     const retryAfter = Number(res.headers.get('Retry-After')) || 0;
-    const reason = (data && (data.reason || (data.error && data.error.reason))) || '';
     // Kurze Sperren abwarten. Ein erschöpftes Kontingent wird nie automatisch wiederholt.
     // Nennt Spotify keine Wartezeit (oder gibt der Browser sie nicht preis), genau einmal nach 2 Sekunden neu versuchen.
     const wait = retryAfter > 0 ? retryAfter : attempt === 0 ? 2 : 0;
@@ -232,7 +245,7 @@ async function request(method, path, { query, body } = {}, attempt = 0) {
 
   if (!res.ok) {
     const message = (data && data.error && data.error.message) || `HTTP ${res.status}`;
-    throw new ApiError(res.status, message, { relogin: res.status === 401 });
+    throw new ApiError(res.status, message, { relogin: res.status === 401, reason });
   }
   return data;
 }
@@ -276,6 +289,26 @@ export const api = {
     request('DELETE', `/playlists/${encodeURIComponent(playlistId)}/items`, {
       body: { items: uris.map((uri) => ({ uri })) },
     }),
+
+  // ----- Wiedergabe (nur mit Premium) -----
+
+  /** Spotify-Geräte, auf denen Spotify gerade geöffnet ist. */
+  async devices() {
+    const data = await request('GET', '/me/player/devices');
+    return ((data && data.devices) || []).filter(Boolean);
+  },
+
+  /** Spielt einen Titel ab einer Stelle auf einem bestimmten Gerät. */
+  play: (deviceId, uri, positionMs) =>
+    request('PUT', '/me/player/play', { query: { device_id: deviceId }, body: { uris: [uri], position_ms: Math.max(0, Math.round(positionMs || 0)) } }),
+
+  /** Aktueller Wiedergabestand (leer, wenn nichts läuft). */
+  playbackState: () => request('GET', '/me/player'),
+
+  pause: (deviceId) => request('PUT', '/me/player/pause', { query: { device_id: deviceId } }),
+
+  seek: (deviceId, positionMs) =>
+    request('PUT', '/me/player/seek', { query: { device_id: deviceId, position_ms: Math.max(0, Math.round(positionMs)) } }),
 
   /** Einzelner lesender Abruf, für den Selbsttest. */
   get: (path, query) => request('GET', path, { query }),
