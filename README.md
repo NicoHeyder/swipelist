@@ -2,7 +2,7 @@
 
 Private Web-App, mit der Nico seine Spotify-Playlists per Wisch aktuell hält. Diese Datei ist zugleich die Wissensdatei für das Projekt: Auftrag, Entscheidungen, Rahmenbedingungen, Stand und nächste Schritte.
 
-Stand: Version 0.2.0 vom 11.11.2026 (Ausbaustufe 2 von 4). Version 0.1.0 läuft auf Nicos Geräten unter https://nicoheyder.github.io/swipelist/, das Anspielen ist dort noch nicht getestet.
+Stand: Version 0.2.1 vom 11.11.2026 (Ausbaustufe 2 von 4). Läuft unter https://nicoheyder.github.io/swipelist/. Erster Test von 0.2.0 am 11.11.2026: Abspielen am iPhone klappte, landete aber auf dem PC-Webplayer; am PC lief noch 0.1.0 aus dem Zwischenspeicher. Beides ist in 0.2.1 behoben, aber noch nicht auf Nicos Geräten getestet.
 
 ## Was die App heute kann
 
@@ -21,7 +21,8 @@ Stand: Version 0.2.0 vom 11.11.2026 (Ausbaustufe 2 von 4). Version 0.1.0 läuft 
 
 - Zwei Wege, beide nur mit Premium. Am PC spielt die Seite selbst ab (Spotifys Web Playback SDK, die Seite erscheint in Spotify als Gerät „Swipelist“). Am Handy steuert die App die Spotify-App fern (Spotify Connect), die Musik kommt aus der Spotify-App.
 - Am Handy muss Spotify geöffnet sein oder im Hintergrund laufen. Ist kein Gerät erreichbar, zeigt die App einen Hinweis und versucht es nicht bei jeder Karte erneut.
-- Gerät und Automatik lassen sich über den Knopf unten links auf dem Cover wählen. Ohne Wahl nimmt die App am Handy das Handy, am PC den Browser; als Ausweichgerät nur Computer oder Handy, nie Lautsprecher, Fernseher oder Auto. Ein ausdrücklich gewähltes Gerät wird nie still ersetzt.
+- Gerät und Automatik lassen sich über den Knopf unten links auf dem Cover wählen. „Automatisch“ heißt: Am Handy spielt nur die Spotify-App auf einem Handy oder Tablet, nie PC, Lautsprecher, Fernseher oder Auto. Am PC spielt der Browser, notfalls ein Computer oder Handy. Ein ausdrücklich gewähltes Gerät wird nie still ersetzt.
+- Unter dem Titel steht, wo gerade gespielt wird (z. B. „auf iPhone“).
 - Alle 15 Sekunden und beim Zurückkehren in die App gleicht sie den Stand mit Spotify ab, damit eine Pause in der Spotify-App oder ein Titelende sichtbar wird.
 - Die Startstelle ist geschätzt. Spotify gibt keine Daten zur meistgehörten Stelle heraus (Audio-Analyse ist für neue Apps seit 27.11.2024 gesperrt).
 - Angespielte Titel landen in „Zuletzt gehört“ und können Spotifys Empfehlungen beeinflussen. Abhilfe: in der Spotify-App eine private Sitzung starten.
@@ -86,7 +87,9 @@ Die Client-ID steht in `config.js`, dann muss sie nicht auf jedem Gerät eingeti
 | `player.js` | Anspielen: Browser-Player oder Spotify-Gerät, Reihenfolge der Befehle, Fehlerarten |
 | `store.js` | Speicher im Browser: Anmeldung, Zwischenspeicher, angefangene Runde |
 | `styles.css` | Gestaltung |
-| `config.js` | Optionale feste Client-ID |
+| `config.js` | Feste Client-ID |
+| `version.json` | Aktuelle Versionsnummer, die App prüft damit auf Updates |
+| `tools/set_version.py` | Setzt die Versionsnummer überall |
 | `tests/` | Automatische Tests mit nachgebauter Spotify-Schnittstelle |
 
 Gespeichert wird nur im Browser des jeweiligen Geräts (`localStorage`). Es gibt keinen eigenen Server.
@@ -99,6 +102,12 @@ Gespeichert wird nur im Browser des jeweiligen Geräts (`localStorage`). Es gibt
 - Spotify verlangt für den Browser-Player die Rechte `user-read-private` und `user-read-email`. Die App liest weder Kontoart noch E-Mail-Adresse aus.
 - „Abmelden“ in den Einstellungen löscht die Anmeldung und alle Daten der App auf dem Gerät.
 - Die Schutzregel im HTML gilt nur für diese Seite. Ein Schutz gegen das Einbetten in fremde Seiten ist auf GitHub Pages nicht einstellbar.
+
+## Neue Version veröffentlichen
+
+1. `python3 tools/set_version.py 0.2.2` setzt die Nummer in `app.js`, an allen Skript- und Stil-Adressen (`?v=…`) und in `version.json`.
+2. Alle Dateien zu GitHub hochladen.
+3. Offene App-Fenster zeigen oben „Neue Version ist da“ mit „Neu laden“. Hintergrund: GitHub Pages lässt Browser Dateien 10 Minuten zwischenspeichern, ohne die Versionsnummer an den Adressen würden alte und neue Dateien gemischt.
 
 ## Tests
 

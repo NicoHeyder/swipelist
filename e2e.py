@@ -29,7 +29,7 @@ def make_handler(world, auth_log):
     def handle(route, request):
         url = request.url
         try:
-            if url == APP + "/config.js":
+            if url.startswith(APP + "/config.js"):
                 # Die Tests beginnen mit der Einrichtung, deshalb ohne fest eingetragene Client-ID.
                 return route.fulfill(status=200, headers={"Content-Type": "text/javascript"}, body="window.SWIPE_CONFIG = { clientId: '' };")
             if url.startswith(APP):
@@ -622,7 +622,7 @@ def run_mobile(browser):
     check("Selbsttest: keine Künstler-, Titel- oder Gerätenamen im Ergebnis", not any(w in out for w in ["Nicos", "Kollektiv", "Nachtbus", "Album 1"]))
     check("Selbsttest ändert nichts", len(world.writes) == writes_before_diag, str(world.writes[writes_before_diag:]))
     page.get_by_role("button", name="Ergebnis kopieren").click()
-    check("Ergebnis lässt sich kopieren", page.evaluate("navigator.clipboard.readText()").startswith("Swipelist 0.2.0"))
+    check("Ergebnis lässt sich kopieren", page.evaluate("navigator.clipboard.readText()").startswith("Swipelist 0.2.1"))
     page.screenshot(path=f"{SHOTS}/11-diagnose.png", full_page=True)
     page.get_by_role("button", name="Zurück").click()
     page.get_by_role("button", name="Abmelden").click()
@@ -790,6 +790,7 @@ def run_playback(browser):
     page.wait_for_timeout(1200)
     shown = page.locator(".card--top .times span").first.inner_text()
     check("Handy: Zeitanzeige läuft ab der Startstelle", shown in ("1:10", "1:11", "1:12"), shown)
+    check("Handy: Karte zeigt, wo gespielt wird", page.locator(".card--top .times__where").inner_text() == "auf Nicos Handy", page.locator(".card--top .times__where").inner_text())
     page.screenshot(path=f"{SHOTS}/40-play-mobile.png")
 
     # Pause und weiter
@@ -837,7 +838,7 @@ def run_playback(browser):
     world.devices = []
     page.get_by_role("button", name="Weiter swipen").last.click()
     page.wait_for_selector(".card--top")
-    wait_toast(page, "Kein Spotify-Gerät erreichbar")
+    wait_toast(page, "Spotify auf diesem Handy ist gerade nicht erreichbar")
     check("Ohne Gerät: verständlicher Hinweis", True)
     check("Ohne Gerät: Knopf zeigt den Fehler", page.locator(".card--top .playbtn").get_attribute("aria-label") == "Erneut anspielen")
     log_before = len(world.log)
@@ -849,10 +850,10 @@ def run_playback(browser):
     # Gerät wählen
     page.get_by_role("button", name="Anspielen einstellen und Gerät wählen").click()
     page.wait_for_selector("dialog[open] .option")
-    page.wait_for_function("() => document.querySelectorAll('dialog[open] .option').length === 3")
+    page.wait_for_function("() => document.querySelectorAll('dialog[open] .option').length === 4")
     page.screenshot(path=f"{SHOTS}/41-play-sheet.png")
     opts = page.locator("dialog[open] .option .row__title").all_inner_texts()
-    check("Auswahl: Browser und beide Spotify-Geräte", opts == ["Dieser Browser", "Nicos Rechner", "Nicos Handy"], str(opts))
+    check("Auswahl: Automatisch, Browser und beide Spotify-Geräte", opts == ["Automatisch", "Dieser Browser", "Nicos Rechner", "Nicos Handy"], str(opts))
     before = len(world.plays)
     page.locator("dialog[open] .option", has_text="Nicos Rechner").click()
     play_count_settles(page, world, before + 1)
@@ -957,6 +958,40 @@ def run_playback(browser):
     ctx.close()
 
 
+def run_phone_only(browser):
+    print("\n== Anspielen: Handy spielt nur auf sich selbst ==")
+    world, auth_log, console = World(), [], []
+    phone = world.devices[1]
+    world.devices = [world.devices[0], {"id": "tv", "name": "Fernseher", "type": "TV", "is_active": False}]
+    ctx, page = new_page(browser, world, auth_log, console, {"width": 390, "height": 844}, True)
+    login(page, world, auth_log)
+    # Stand aus Version 0.2.0: automatisch gemerkter PC
+    page.evaluate("localStorage.setItem('sw.play', JSON.stringify({ auto: true, target: null, deviceId: 'd1', deviceName: 'Nicos Rechner' }))")
+    page.get_by_role("button", name="Roadtrip").click()
+    page.get_by_role("button", name="20", exact=True).click()
+    page.get_by_role("button", name="Runde starten").click()
+    page.wait_for_selector(".card--top")
+    wait_toast(page, "Spotify auf diesem Handy ist gerade nicht erreichbar")
+    check("Handy ohne Spotify: kein Abspielen auf PC oder Fernseher", world.plays == [], str(world.plays))
+    world.devices = world.devices + [phone]
+    page.locator(".card--top .playbtn").click()
+    play_count_settles(page, world, 1)
+    check("Spotify auf dem Handy wieder da: spielt dort, nicht auf dem gemerkten PC", world.plays and world.plays[-1][0] == "d2", str(world.plays))
+    ctx.close()
+
+    print("\n== Neue Version ==")
+    world, auth_log, console = World(), [], []
+    ctx, page = new_page(browser, world, auth_log, console, {"width": 390, "height": 844}, True)
+    login(page, world, auth_log)
+    page.wait_for_timeout(500)
+    check("Gleiche Version: kein Hinweis", page.locator(".update").count() == 0)
+    ctx.route("**/version.json*", lambda route, request: route.fulfill(status=200, headers={"Content-Type": "application/json"}, body='{"version": "9.9.9"}'))
+    page.reload()
+    page.wait_for_selector(".update", timeout=5000)
+    check("Neue Version: Hinweis mit „Neu laden“", "9.9.9" in page.locator(".update").inner_text() and page.get_by_role("button", name="Neu laden", exact=True).is_visible())
+    ctx.close()
+
+
 def run_races(browser):
     print("\n== Anspielen: Wettläufe ==")
     # Verlassen, während die Geräteliste noch unterwegs ist: danach darf kein Abspielbefehl mehr rausgehen.
@@ -1040,7 +1075,7 @@ def main():
         with sync_playwright() as pw:
             chrome = "/usr/bin/google-chrome"
             browser = pw.chromium.launch(executable_path=chrome, headless=True) if os.path.exists(chrome) else pw.chromium.launch(headless=True)
-            for run in (run_mobile, run_small, run_desktop, run_auth_errors, run_safety, run_playback, run_races):
+            for run in (run_mobile, run_small, run_desktop, run_auth_errors, run_safety, run_playback, run_races, run_phone_only):
                 try:
                     run(browser)
                 except Exception as exc:

@@ -1,11 +1,11 @@
 // Oberfläche der App: Ansichten, Wischen, Prüfliste, Anwenden und Rückgängig.
 
-import * as L from './logic.js';
-import { store } from './store.js';
-import * as sp from './spotify.js';
-import * as player from './player.js';
+import * as L from './logic.js?v=0.2.1';
+import { store } from './store.js?v=0.2.1';
+import * as sp from './spotify.js?v=0.2.1';
+import * as player from './player.js?v=0.2.1';
 
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 const ROUND_SIZES = [20, 50, 0]; // 0 = alle
 const LIST_MAX_AGE_MS = 10 * 60 * 1000; // danach wird die Playlist-Liste beim Anzeigen neu geholt
 const FRESH_MS = 20 * 1000; // vor dem Start einer Runde darf die Liste höchstens so alt sein
@@ -724,7 +724,7 @@ function leaveSwipe() {
   clearInterval(progressTimer);
   progressTimer = null;
   player.stop();
-  for (const key of ['playBtn', 'playIcon', 'seek', 'seekFill', 'timeNow']) ui[key] = null;
+  for (const key of ['playBtn', 'playIcon', 'seek', 'seekFill', 'timeNow', 'where']) ui[key] = null;
 }
 
 /** Spielt die oberste Karte nach kurzer Pause automatisch an, wenn das eingeschaltet ist. */
@@ -782,6 +782,7 @@ function updateProgress() {
   const d = card.durationMs || 0;
   const st = player.state();
   const active = st.uri === card.uri && (st.status === 'playing' || st.status === 'starting' || st.status === 'paused');
+  if (ui.where) ui.where.textContent = active ? `auf ${player.deviceLabel()}` : '';
   if (active && d) {
     const pos = player.position();
     ui.seekFill.style.width = `${Math.min(100, (pos / d) * 100).toFixed(2)}%`;
@@ -877,15 +878,21 @@ async function openPlaySheet() {
           h('div', { class: 'row__text' }, h('div', { class: 'row__title', text: label }), sub ? h('div', { class: 'row__sub', text: sub }) : null),
           selected ? h('span', { class: 'row__end' }, icon('check', 20)) : null,
         );
+      const autoText = c.touch ? 'Spielt in der Spotify-App auf diesem Handy.' : 'Spielt direkt in diesem Browser.';
       const rows = [
-        option('Dieser Browser', c.browser.available ? 'Spielt direkt in dieser Seite. Gedacht für den PC.' : c.browser.note, c.target === player.BROWSER, () => {
+        option('Automatisch', autoText, c.mode === 'auto', () => {
+          player.chooseAuto();
+          close('picked');
+        }),
+        option('Dieser Browser', c.browser.available ? 'Spielt direkt in dieser Seite. Gedacht für den PC.' : c.browser.note, c.mode === player.BROWSER, () => {
           player.chooseBrowser();
           close('picked');
         }, !c.browser.available),
       ];
       for (const d of c.devices) {
+        const sub = d.id === c.currentId ? `${deviceText(d)}, spielt hier` : deviceText(d);
         rows.push(
-          option(d.name || 'Spotify-Gerät', deviceText(d), c.target === player.DEVICE && d.id === c.selectedId, () => {
+          option(d.name || 'Spotify-Gerät', sub, c.mode === player.DEVICE && d.id === c.selectedId, () => {
             player.chooseDevice(d);
             close('picked');
           }, Boolean(d.is_restricted)),
@@ -1016,7 +1023,7 @@ function buildCard(track, top) {
       h('div', { class: 'card__title', text: track.name }),
       h('div', { class: 'card__artist', text: L.artistText(track) }),
       seek,
-      h('div', { class: 'times' }, now, h('span', { text: d ? L.formatTime(d) : '' })),
+      h('div', { class: 'times' }, now, top ? (ui.where = h('span', { class: 'times__where' })) : h('span'), h('span', { text: d ? L.formatTime(d) : '' })),
     ),
   );
 }
@@ -1723,11 +1730,42 @@ async function runDiagnose(log) {
 
 // Kommt die App nach längerer Pause wieder in den Vordergrund, die Playlist-Liste auffrischen.
 document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') checkForUpdate();
   if (document.visibilityState === 'visible' && S.view === 'swipe') player.sync();
   if (document.visibilityState === 'visible' && S.view === 'playlists' && !document.querySelector('dialog[open]') && Date.now() - S.playlistsAt > LIST_MAX_AGE_MS) {
     showPlaylists();
   }
 });
+
+// ---------- Neue Version ----------
+
+// Der Browser hält Dateien von GitHub Pages bis zu 10 Minuten im Zwischenspeicher, und eine offene Seite
+// bleibt ohnehin auf ihrem Stand. Deshalb fragt die App beim Start und beim Zurückkehren nach der aktuellen Version.
+let updateShown = false;
+
+async function checkForUpdate() {
+  if (updateShown) return;
+  try {
+    const res = await fetch(`version.json?t=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data && typeof data.version === 'string' && data.version !== VERSION) showUpdate(data.version);
+  } catch {
+    /* offline oder Datei fehlt: kein Hinweis */
+  }
+}
+
+function showUpdate(version) {
+  updateShown = true;
+  document.body.append(
+    h(
+      'div',
+      { class: 'update', role: 'status' },
+      h('span', { text: `Neue Version ${version} ist da.` }),
+      h('button', { class: 'update__btn', type: 'button', text: 'Neu laden', onclick: () => window.location.reload() }),
+    ),
+  );
+}
 
 // ---------- Start ----------
 
@@ -1754,3 +1792,4 @@ async function init() {
 }
 
 init();
+checkForUpdate();

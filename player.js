@@ -3,9 +3,9 @@
 // - Spotify-Gerät: Die App steuert Spotify auf dem Handy oder PC fern (Spotify Connect), die Musik kommt aus der Spotify-App.
 // Die Musik kommt in beiden Fällen von Spotify. Andere Dienste sind nach der Spotify Developer Policy nicht erlaubt.
 
-import * as L from './logic.js';
-import { store } from './store.js';
-import * as sp from './spotify.js';
+import * as L from './logic.js?v=0.2.1';
+import { store } from './store.js?v=0.2.1';
+import * as sp from './spotify.js?v=0.2.1';
 
 const SDK_URL = 'https://sdk.scdn.co/spotify-player.js';
 const SDK_READY_TIMEOUT_MS = 12000;
@@ -18,6 +18,8 @@ const TEXTS = {
   scopes: 'Für das Anspielen braucht Swipelist einmal zusätzliche Rechte bei Spotify. Tippe auf „Neu verbinden“.',
   nodevice:
     'Kein Spotify-Gerät erreichbar. Öffne die Spotify-App auf diesem Handy oder deinem PC, starte kurz einen Titel und versuche es dann erneut.',
+  nophone:
+    'Spotify auf diesem Handy ist gerade nicht erreichbar. Öffne die Spotify-App, starte kurz einen Titel und komm zurück. Ein anderes Gerät wählst du über den Knopf unten links auf dem Cover.',
   premium: 'Abspielen geht nur mit Spotify Premium.',
   unsupported: 'Dieser Browser kann Spotify nicht selbst abspielen. Wähle die Spotify-App als Gerät.',
   browser: 'Der Spotify-Player im Browser reagiert nicht. Versuche es erneut, lade die Seite neu oder wähle über den Knopf unten links die Spotify-App.',
@@ -41,6 +43,7 @@ const P = {
   seq: 0, // jede neue Aktion erhöht die Zahl; ältere Antworten werden verworfen
   queue: Promise.resolve(), // Befehle an Spotify laufen nacheinander, weil Spotify die Reihenfolge sonst nicht garantiert
   deviceId: null, // gewähltes Spotify-Gerät in dieser Sitzung
+  deviceName: '',
   blockedUntil: 0,
   audible: null, // was die App zuletzt nachweislich gestartet hat: { browser, deviceId }
   syncedAt: 0,
@@ -54,7 +57,9 @@ let errorHandler = null;
 
 function prefs() {
   const saved = store.get('play');
-  return { auto: true, target: null, deviceId: null, deviceName: '', ...(saved && typeof saved === 'object' ? saved : {}) };
+  // target: null = automatisch, BROWSER oder DEVICE = ausdrücklich gewählt (dann gilt deviceId).
+  // autoId: zuletzt automatisch genutztes Gerät, nur als Vorrang unter passenden Geräten.
+  return { auto: true, target: null, deviceId: null, deviceName: '', autoId: null, ...(saved && typeof saved === 'object' ? saved : {}) };
 }
 
 function savePrefs(change) {
@@ -84,9 +89,10 @@ export function target() {
   return wanted;
 }
 
-export function targetLabel() {
-  if (target() === BROWSER) return 'Dieser Browser';
-  return prefs().deviceName || 'Spotify-App';
+/** Wo gerade abgespielt wird, für die Anzeige auf der Karte. */
+export function deviceLabel() {
+  if (target() === BROWSER) return 'diesem Browser';
+  return P.deviceName || (prefs().target === DEVICE ? prefs().deviceName : '') || 'Spotify-App';
 }
 
 export function needsReconnect() {
@@ -327,16 +333,24 @@ export function prepare() {
 
 // ---------- Spotify-Gerät (Connect) ----------
 
-const AUTO_TYPES = new Set(['computer', 'smartphone']);
+const PHONE_TYPES = new Set(['smartphone', 'tablet']);
 
 async function deviceList() {
   const own = P.sdk.deviceId;
   return (await sp.api.devices()).filter((d) => d.id !== own);
 }
 
+/** Geräte, die ohne ausdrückliche Wahl infrage kommen: am Handy nur Handys und Tablets, am PC Computer und notfalls Handys. */
+export function autoCandidates(devices, touch) {
+  return devices.filter((d) => {
+    const type = String(d.type || '').toLowerCase();
+    return touch ? PHONE_TYPES.has(type) : type === 'computer' || PHONE_TYPES.has(type);
+  });
+}
+
 /**
  * Gerät für den nächsten Befehl. Ein ausdrücklich gewähltes Gerät wird nie still durch ein anderes ersetzt.
- * Ohne ausdrückliche Wahl kommen nur Computer und Handys infrage, keine Lautsprecher, Fernseher oder Autos.
+ * Ohne ausdrückliche Wahl spielt das Handy auf sich selbst und nie auf PC, Lautsprecher, Fernseher oder Auto.
  */
 async function resolveDevice(fresh) {
   if (target() === BROWSER) return ensureSdk();
@@ -346,12 +360,17 @@ async function resolveDevice(fresh) {
   let device;
   if (pr.target === DEVICE) {
     device = list.find((d) => d.id === pr.deviceId && !d.is_restricted) || null;
+    if (!device) {
+      throw new PlayError('nodevice', pr.deviceName ? `„${pr.deviceName}“ ist gerade nicht erreichbar. Öffne Spotify dort oder wähle über den Knopf unten links ein anderes Gerät.` : TEXTS.nodevice);
+    }
   } else {
-    device = L.pickDevice(list.filter((d) => AUTO_TYPES.has(String(d.type).toLowerCase())), pr.deviceId, isTouch());
-    if (device) savePrefs({ deviceId: device.id, deviceName: device.name || '' });
+    const touch = isTouch();
+    device = L.pickDevice(autoCandidates(list, touch), pr.autoId, touch);
+    if (!device) throw new PlayError('nodevice', touch ? TEXTS.nophone : TEXTS.nodevice);
+    savePrefs({ autoId: device.id });
   }
-  if (!device) throw new PlayError('nodevice', pr.target === DEVICE && pr.deviceName ? `„${pr.deviceName}“ ist gerade nicht erreichbar. Öffne Spotify dort oder wähle ein anderes Gerät.` : TEXTS.nodevice);
   P.deviceId = device.id;
+  P.deviceName = device.name || '';
   return device.id;
 }
 
@@ -534,6 +553,7 @@ export function reset() {
   P.sdk.failKind = '';
   P.sdk.failText = '';
   P.deviceId = null;
+  P.deviceName = '';
   P.audible = null;
   P.blockedUntil = 0;
   P.status = 'idle';
@@ -576,7 +596,7 @@ export function sinceSync() {
 
 // ---------- Geräteauswahl ----------
 
-/** Daten für die Auswahl: ob der Browser selbst abspielen kann und welche Spotify-Geräte erreichbar sind. */
+/** Daten für die Auswahl: Modus, ob der Browser selbst abspielen kann und welche Spotify-Geräte erreichbar sind. */
 export async function choices() {
   const browserOk = P.sdk.failKind !== 'unsupported' && P.sdk.failKind !== 'premium';
   let devices = [];
@@ -586,20 +606,19 @@ export async function choices() {
   } catch (err) {
     error = classify(err).message;
   }
+  const pr = prefs();
   return {
-    target: target(),
-    selectedId: P.deviceId || prefs().deviceId,
+    mode: pr.target === BROWSER || pr.target === DEVICE ? pr.target : 'auto',
+    selectedId: pr.target === DEVICE ? pr.deviceId : null,
+    currentId: target() === DEVICE ? P.deviceId : null,
+    touch: isTouch(),
     browser: { available: browserOk, note: browserOk ? '' : P.sdk.failText || TEXTS.unsupported },
     devices,
     error,
   };
 }
 
-export function chooseBrowser() {
-  pause();
-  savePrefs({ target: BROWSER });
-  P.deviceId = null;
-  if (P.sdk.failKind && P.sdk.state !== 'failed') P.sdk.failKind = '';
+function afterChoice() {
   P.blockedUntil = 0;
   if (P.status === 'error') {
     P.status = 'idle';
@@ -608,16 +627,30 @@ export function chooseBrowser() {
   emit();
 }
 
+export function chooseAuto() {
+  pause();
+  savePrefs({ target: null, deviceId: null, deviceName: '' });
+  P.deviceId = null;
+  P.deviceName = '';
+  if (P.sdk.failKind && P.sdk.state !== 'failed') P.sdk.failKind = '';
+  afterChoice();
+}
+
+export function chooseBrowser() {
+  pause();
+  savePrefs({ target: BROWSER });
+  P.deviceId = null;
+  P.deviceName = '';
+  if (P.sdk.failKind && P.sdk.state !== 'failed') P.sdk.failKind = '';
+  afterChoice();
+}
+
 export function chooseDevice(device) {
   pause();
   savePrefs({ target: DEVICE, deviceId: device.id, deviceName: device.name || '' });
   P.deviceId = device.id;
-  P.blockedUntil = 0;
-  if (P.status === 'error') {
-    P.status = 'idle';
-    P.error = null;
-  }
-  emit();
+  P.deviceName = device.name || '';
+  afterChoice();
 }
 
 /** Für Tests und den Selbsttest: Zustand des Browser-Players. */

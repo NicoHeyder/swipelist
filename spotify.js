@@ -2,7 +2,7 @@
 // Stand der Schnittstelle: Web API Changelog Februar 2026 (Development Mode).
 // Playlist-Inhalte laufen seitdem über /playlists/{id}/items, nicht mehr über /tracks.
 
-import { store } from './store.js';
+import { store } from './store.js?v=0.2.1';
 
 const AUTH_URL = 'https://accounts.spotify.com/authorize';
 const TOKEN_URL = 'https://accounts.spotify.com/api/token';
